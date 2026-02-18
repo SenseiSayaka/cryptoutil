@@ -1,5 +1,6 @@
 """Главное окно приложения"""
 import os
+import threading
 import flet as ft
 from typing import Optional
 
@@ -7,6 +8,7 @@ from .theme import AppTheme
 from .profiles import ProfileManager, EncryptionProfile
 from .key_manager import KeyManager
 from .crypto_engine import CryptoEngine, OperationResult
+from .drop_overlay import DropOverlay
 
 
 class CryptoApp:
@@ -35,6 +37,18 @@ class CryptoApp:
         )
         self.status_text = ft.Text("", size=13, color=AppTheme.TEXT_SECONDARY)
 
+        # Drop overlay (tkinter)
+        self._drop_overlay = DropOverlay(on_files_dropped=self._on_os_files_dropped)
+        self._drop_overlay.on_hover_enter = self._on_drop_hover_enter
+        self._drop_overlay.on_hover_leave = self._on_drop_hover_leave
+
+        # Ссылка на контейнер drop-зоны для отслеживания позиции
+        self._drop_zone_container: Optional[ft.Container] = None
+        self._drop_zone_key = "drop_zone_container"
+
+        # Флаг для потока синхронизации позиции
+        self._overlay_sync_running = False
+
     def build(self):
         self.page.title = "CryptoUtil"
         self.page.bgcolor = AppTheme.BG_PRIMARY
@@ -58,6 +72,10 @@ class CryptoApp:
         # Keyboard
         self.page.on_keyboard_event = self._on_keyboard
 
+        # Отслеживание перемещения/ресайза окна
+        self.page.on_resized = self._on_window_change
+        self.page.window.on_moved = self._on_window_change
+
         # Layout
         sidebar = self._build_sidebar()
         main_content = self._build_main_content()
@@ -71,6 +89,145 @@ class CryptoApp:
         self.page.add(layout)
         self._refresh_profiles()
         self._switch_view("encrypt")
+
+        # Запускаем overlay после отрисовки
+        self._start_drop_overlay()
+
+    def _start_drop_overlay(self):
+        """Запуск overlay и потока синхронизации позиции"""
+        self._drop_overlay.start()
+        self._overlay_sync_running = True
+        self._sync_thread = threading.Thread(
+            target=self._sync_overlay_position_loop, daemon=True
+        )
+        self._sync_thread.start()
+
+    def _sync_overlay_position_loop(self):
+        """Периодически обновляет позицию overlay по положению окна Flet"""
+        import time
+        while self._overlay_sync_running:
+            try:
+                self._update_overlay_position()
+            except Exception:
+                pass
+            time.sleep(0.3)  # 3 раза в секунду
+
+    def _update_overlay_position(self):
+        """Вычисляет абсолютную позицию drop-зоны на экране и двигает overlay"""
+        if not self._drop_zone_container:
+            return
+
+        try:
+            # Позиция окна Flet
+            win_x = int(self.page.window.left or 0)
+            win_y = int(self.page.window.top or 0)
+
+            # Отступы: sidebar(240) + padding(24) + смещение до drop zone
+            # Эти значения нужно подстроить под ваш layout
+            sidebar_width = AppTheme.SIDEBAR_WIDTH  # 240
+            content_padding = 24
+
+            # Примерное вертикальное смещение до drop zone
+            # (заголовок + профиль + пароль + отступы)
+            # Подбирается эмпирически или можно хардкодить
+            vertical_offset = self._estimate_drop_zone_y_offset()
+
+            zone_x = win_x + sidebar_width + content_padding + 1  # +1 для border
+            zone_y = win_y + vertical_offset
+
+            # Ширина = ширина окна - sidebar - padding*2
+            win_w = int(self.page.window.width or 1280)
+            win_h = int(self.page.window.height or 800)
+            zone_w = win_w - sidebar_width - content_padding * 2 - 20
+            zone_h = 160  # высота drop zone
+
+            # Ограничения
+            zone_w = max(200, zone_w)
+            zone_h = max(80, zone_h)
+
+            self._drop_overlay.update_position(zone_x, zone_y, zone_w, zone_h)
+        except Exception:
+            pass
+
+    def _estimate_drop_zone_y_offset(self) -> int:
+        """
+        Приблизительное вертикальное смещение drop-зоны от верха окна.
+        Зависит от текущего view. Подстройте значения под вашу вёрстку.
+        """
+        # Базовое смещение: title bar (~30) + padding (24)
+        base = 60
+
+        if self.current_view in ("encrypt", "decrypt"):
+            # Заголовок(24+14) + spacing + profile_card(~70) + password(~56) + gaps
+            return base + 240
+        elif self.current_view in ("sign",):
+            return base + 180
+        elif self.current_view in ("verify",):
+            return base + 160
+        elif self.current_view in ("hash",):
+            return base + 230
+        else:
+            return base + 200
+
+    def _on_window_change(self, e=None):
+        """При перемещении/ресайзе окна обновляем overlay"""
+        self._update_overlay_position()
+
+    # ─── DROP OVERLAY CALLBACKS ─────────────────────────────────────────
+
+    def _on_os_files_dropped(self, files: list[str]):
+        """Callback из tkinter overlay — файлы перетащены из ОС"""
+        for f in files:
+            if f and f not in self.dropped_files and os.path.exists(f):
+                self.dropped_files.append(f)
+
+        # Обновляем UI из другого потока — используем page.run
+        def update_ui():
+            # Добавляем файлы в список
+            for f in files:
+                if os.path.exists(f):
+                    self._add_file_to_list(f)
+            self._update_drop_zone_count()
+            self.page.update()
+
+        try:
+            # Flet поддерживает вызов из другого потока
+            self.page.run_thread(update_ui)
+        except AttributeError:
+            # Fallback для старых версий flet
+            update_ui()
+
+    def _on_drop_hover_enter(self):
+        """Курсор с файлами вошёл в зону"""
+        def update():
+            if self._drop_zone_container:
+                self._drop_zone_container.border = ft.border.all(
+                    3, AppTheme.ACCENT_PRIMARY
+                )
+                self._drop_zone_container.bgcolor = f"{AppTheme.ACCENT_PRIMARY}20"
+                self.drop_zone_text.value = "Отпустите файлы здесь"
+                self.drop_zone_text.color = AppTheme.ACCENT_PRIMARY
+                self.page.update()
+        try:
+            self.page.run_thread(update)
+        except AttributeError:
+            update()
+
+    def _on_drop_hover_leave(self):
+        """Курсор с файлами покинул зону"""
+        def update():
+            if self._drop_zone_container:
+                self._drop_zone_container.border = ft.border.all(
+                    2, f"{AppTheme.ACCENT_PRIMARY}40"
+                )
+                self._drop_zone_container.bgcolor = f"{AppTheme.ACCENT_PRIMARY}08"
+                self._update_drop_zone_count()
+                self.drop_zone_text.color = AppTheme.TEXT_SECONDARY
+                self.page.update()
+        try:
+            self.page.run_thread(update)
+        except AttributeError:
+            update()
 
     # ─── SIDEBAR ────────────────────────────────────────────────────────
 
@@ -220,6 +377,15 @@ class CryptoApp:
         self.page.update()
         self._rebuild_sidebar_nav()
 
+        # Обновляем позицию overlay для нового view
+        self._update_overlay_position()
+
+        # Показываем/скрываем overlay (не нужен на вкладке "keys")
+        if view == "keys":
+            self._drop_overlay.update_position(-9999, -9999, 1, 1)  # прячем за экран
+        else:
+            self._update_overlay_position()
+
     def _rebuild_sidebar_nav(self):
         sidebar = self.page.controls[0].controls[0]
         nav_col = sidebar.content.controls[1].content
@@ -250,7 +416,6 @@ class CryptoApp:
             width=400,
         )
 
-        # Подсказка зависит от режима
         if profile:
             if profile.mode == "symmetric" and profile.use_password:
                 password_hint = "Пароль для шифрования данных (обязательно)"
@@ -786,7 +951,7 @@ class CryptoApp:
             spacing=8,
         )
 
-        drop_container = ft.Container(
+        self._drop_zone_container = ft.Container(
             content=drop_content,
             height=160,
             border=ft.border.all(2, f"{AppTheme.ACCENT_PRIMARY}40"),
@@ -800,14 +965,16 @@ class CryptoApp:
             ink=True,
         )
 
-        return drop_container
+        # Обновляем позицию overlay при создании drop zone
+        self._update_overlay_position()
+
+        return self._drop_zone_container
 
     # ─── PROFILE CARD ───────────────────────────────────────────────────
 
     def _build_profile_info_card(self, profile: EncryptionProfile) -> ft.Container:
         chips = []
 
-        # Mode chip
         chips.append(ft.Container(
             content=ft.Text(profile.mode.upper(), size=11,
                             color="white", weight=ft.FontWeight.W_700),
@@ -816,7 +983,6 @@ class CryptoApp:
             padding=ft.padding.symmetric(horizontal=8, vertical=3),
         ))
 
-        # Symmetric algorithm chip
         chips.append(ft.Container(
             content=ft.Text(profile.symmetric_algorithm, size=11,
                             color=AppTheme.TEXT_PRIMARY),
@@ -826,7 +992,6 @@ class CryptoApp:
             border=ft.border.all(1, AppTheme.BORDER_COLOR),
         ))
 
-        # RSA chip
         if profile.mode in ("hybrid", "asymmetric"):
             chips.append(ft.Container(
                 content=ft.Text(f"RSA-{profile.rsa_key_size}", size=11,
@@ -837,7 +1002,6 @@ class CryptoApp:
                 border=ft.border.all(1, AppTheme.BORDER_COLOR),
             ))
 
-        # Auto-sign chip
         if profile.auto_sign:
             chips.append(ft.Container(
                 content=ft.Text("Автоподпись", size=11, color=AppTheme.SUCCESS),
@@ -951,6 +1115,11 @@ class CryptoApp:
             self.page.update()
 
     def _add_file_to_list(self, filepath: str):
+        # Проверяем, нет ли уже в списке
+        for c in self.file_list.controls:
+            if getattr(c, 'data', None) == filepath:
+                return
+
         filename = os.path.basename(filepath)
         try:
             size = os.path.getsize(filepath)
@@ -980,7 +1149,7 @@ class CryptoApp:
             padding=ft.padding.symmetric(horizontal=12, vertical=4),
             border_radius=6,
             bgcolor=AppTheme.BG_CARD,
-            data=filepath,  # store filepath in data for easy removal
+            data=filepath,
         )
         self.file_list.controls.append(item)
 
@@ -1065,27 +1234,22 @@ class CryptoApp:
                 self._add_log(f"Зашифровано -> {out_name}", is_success=True)
 
                 if result.details:
-                    # Показываем источник ключа
                     key_src = result.details.get('key_source', '')
                     if key_src:
                         self._add_log(f"  Ключ: {key_src}")
 
-                    # Показываем путь к сохранённому ключу
                     key_file = result.details.get('key_file', '')
                     if key_file:
                         self._add_log(f"  Файл ключа: {os.path.basename(key_file)}")
 
-                    # Предупреждение о новых ключах
                     warning = result.details.get('warning', '')
                     if warning:
                         self._add_log(f"  ⚠️ {warning}", is_error=True)
 
-                    # Пути к сгенерированным ключам
                     priv = result.details.get('private_key_path', '')
                     pub = result.details.get('public_key_path', '')
                     if priv:
                         self._add_log(f"  Приватный ключ: {priv}")
-                        # Обновляем профиль
                         profile.private_key_path = priv
                     if pub:
                         self._add_log(f"  Публичный ключ: {pub}")
@@ -1096,13 +1260,11 @@ class CryptoApp:
                             self.selected_profile_index, profile
                         )
 
-                    # Хеш
                     h = result.details.get('hash', '')
                     ha = result.details.get('hash_algorithm', '')
                     if h:
                         self._add_log(f"  Хеш ({ha}): {h[:48]}...")
 
-                    # Подпись
                     sig = result.details.get('signature_file', '')
                     if sig:
                         self._add_log(f"  Подпись: {os.path.basename(sig)}", is_success=True)
@@ -1253,7 +1415,6 @@ class CryptoApp:
             if result.output_path:
                 self._add_log(f"  Сохранено в: {result.output_path}")
 
-            # Update profile with key paths
             if result.details:
                 profile.private_key_path = result.details.get("private_key_path", "")
                 profile.public_key_path = result.details.get("public_key_path", "")
@@ -1514,3 +1675,10 @@ class CryptoApp:
             idx = key_map.get(e.key)
             if idx is not None and idx < len(views):
                 self._switch_view(views[idx])
+
+    # ─── CLEANUP ────────────────────────────────────────────────────────
+
+    def cleanup(self):
+        """Вызывать при закрытии приложения"""
+        self._overlay_sync_running = False
+        self._drop_overlay.stop()
