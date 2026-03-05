@@ -21,9 +21,13 @@ class EncryptionProfile:
     signature_algorithm: str = "Ed25519"  # RSA, Ed25519
     # Алгоритм хеширования
     hash_algorithm: str = "sha256"
-    # Пути к ключам
+    # Пути к ключам шифрования (RSA hybrid/asymmetric)
     private_key_path: str = ""
     public_key_path: str = ""
+    # Пути к ключам подписи (отдельно от шифрования!)
+    # Если пусты — sign_file использует private_key_path как fallback
+    signing_private_key_path: str = ""
+    signing_public_key_path: str = ""
     # Использовать пароль
     use_password: bool = False
     # Автоподпись

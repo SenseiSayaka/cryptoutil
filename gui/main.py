@@ -132,14 +132,16 @@ class CryptoApp:
             # Подбирается эмпирически или можно хардкодить
             vertical_offset = self._estimate_drop_zone_y_offset()
 
-            zone_x = win_x + sidebar_width + content_padding + 1  # +1 для border
-            zone_y = win_y + vertical_offset
+            # Inset 6px — overlay чуть меньше визуальной зоны,
+            # чтобы клики по крестику и кнопкам у края не перехватывались overlay
+            inset = 6
+            zone_x = win_x + sidebar_width + content_padding + inset
+            zone_y = win_y + vertical_offset + inset
 
-            # Ширина = ширина окна - sidebar - padding*2
             win_w = int(self.page.window.width or 1280)
             win_h = int(self.page.window.height or 800)
-            zone_w = win_w - sidebar_width - content_padding * 2 - 20
-            zone_h = 160  # высота drop zone
+            zone_w = win_w - sidebar_width - content_padding * 2 - 20 - inset * 2
+            zone_h = 160 - inset * 2  # высота drop zone
 
             # Ограничения
             zone_w = max(200, zone_w)
@@ -158,14 +160,17 @@ class CryptoApp:
         base = 60
 
         if self.current_view in ("encrypt", "decrypt"):
-            # Заголовок(24+14) + spacing + profile_card(~70) + password(~56) + gaps
+            # title_bar(32) + padding(24) + profile_card(70) + password(56) + gaps(58)
             return base + 240
-        elif self.current_view in ("sign",):
-            return base + 180
-        elif self.current_view in ("verify",):
-            return base + 160
-        elif self.current_view in ("hash",):
-            return base + 230
+        elif self.current_view == "sign":
+            # title_bar(32) + padding(24) + algo_label(30) + gaps(20)
+            return base + 120
+        elif self.current_view == "verify":
+            # title_bar(32) + padding(24) + algo_label(30) + sig_field(56) + gaps(28)
+            return base + 168
+        elif self.current_view == "hash":
+            # title_bar(32) + padding(24) + algo_dropdown(50) + gaps(20)
+            return base + 140
         else:
             return base + 200
 
@@ -382,7 +387,7 @@ class CryptoApp:
 
         # Показываем/скрываем overlay (не нужен на вкладке "keys")
         if view == "keys":
-            self._drop_overlay.update_position(-9999, -9999, 1, 1)  # прячем за экран
+            self._drop_overlay.hide()  # прячем на вкладке keys
         else:
             self._update_overlay_position()
 
@@ -1246,16 +1251,26 @@ class CryptoApp:
                     if warning:
                         self._add_log(f"  ⚠️ {warning}", is_error=True)
 
+                    # СТАЛО — ключи шифрования и подписи хранятся раздельно:
                     priv = result.details.get('private_key_path', '')
-                    pub = result.details.get('public_key_path', '')
+                    pub  = result.details.get('public_key_path', '')
                     if priv:
-                        self._add_log(f"  Приватный ключ: {priv}")
                         profile.private_key_path = priv
                     if pub:
-                        self._add_log(f"  Публичный ключ: {pub}")
                         profile.public_key_path = pub
 
-                    if priv or pub:
+                    # Ключи подписи (автогенерация при автоподписи) — в отдельные поля
+                    sign_priv = result.details.get('signing_private_key_path', '')
+                    sign_pub  = result.details.get('signing_public_key_path', '')
+                    keys_changed = bool(priv or pub or sign_priv or sign_pub)
+                    if sign_priv:
+                        profile.signing_private_key_path = sign_priv
+                        self._add_log(f"  Ключ подписи (приватный): {sign_priv}")
+                    if sign_pub:
+                        profile.signing_public_key_path = sign_pub
+                        self._add_log(f"  Ключ подписи (публичный): {sign_pub}")
+                    # Сохраняем профиль на диск — иначе ключи подписи потеряются при перезапуске
+                    if keys_changed and self.selected_profile_index is not None:
                         self.profile_manager.update_profile(
                             self.selected_profile_index, profile
                         )
@@ -1315,6 +1330,23 @@ class CryptoApp:
             result = CryptoEngine.sign_file(filepath, profile, password)
             if result.success:
                 self._add_log(f"Подписано: {result.message}", is_success=True)
+                if result.details:
+                    warning = result.details.get('warning', '')
+                    if warning:
+                        self._add_log(f"  ⚠️ {warning}", is_error=True)
+                    # Сохраняем ключи подписи в профиль (если были сгенерированы)
+                    sign_priv = result.details.get('signing_private_key_path', '')
+                    sign_pub  = result.details.get('signing_public_key_path', '')
+                    if sign_priv:
+                        profile.signing_private_key_path = sign_priv
+                        self._add_log(f"  Ключ подписи сохранён: {sign_priv}")
+                    if sign_pub:
+                        profile.signing_public_key_path = sign_pub
+                    if (sign_priv or sign_pub) and self.selected_profile_index is not None:
+                        self.profile_manager.update_profile(
+                            self.selected_profile_index, profile
+                        )
+                        self._add_log(f"  Профиль обновлён — ключи подписи сохранены")
             else:
                 self._add_log(f"Ошибка: {result.message}", is_error=True)
 
@@ -1334,6 +1366,48 @@ class CryptoApp:
         for filepath in list(self.dropped_files):
             actual_sig = sig_path or (filepath + ".sig")
             self._add_log(f"Проверка: {os.path.basename(filepath)}...")
+
+            # Диагностика — показываем какие ключи используются
+            sign_pub = getattr(profile, 'signing_public_key_path', '') or ''
+            pub      = profile.public_key_path or ''
+            self._add_log(f"  signing_public_key_path: {sign_pub or '(пусто)'}")
+            self._add_log(f"  public_key_path:         {pub or '(пусто)'}")
+            self._add_log(f"  .sig файл: {actual_sig}")
+            import os as _os
+            self._add_log(f"  .sig существует: {_os.path.exists(actual_sig)}")
+
+            # Читаем что внутри .sig — алгоритм и хеш
+            if _os.path.exists(actual_sig):
+                try:
+                    from src.signatures import SignedMessage
+                    sm = SignedMessage.load_from_file(actual_sig)
+                    self._add_log(f"  .sig алгоритм: {sm.algorithm}")
+                    self._add_log(f"  .sig хеш файла: {sm.message.hex()[:32]}...")
+                    self._add_log(f"  .sig длина подписи: {len(sm.signature)} байт")
+                except Exception as ex:
+                    self._add_log(f"  .sig parse error: {ex}")
+
+            # Читаем тип публичного ключа из файла
+            key_for_check = sign_pub or pub
+            if key_for_check and _os.path.exists(key_for_check):
+                try:
+                    from cryptography.hazmat.primitives import serialization
+                    from cryptography.hazmat.backends import default_backend
+                    with open(key_for_check, 'rb') as _f:
+                        raw = _f.read()
+                    k = serialization.load_pem_public_key(raw, backend=default_backend())
+                    self._add_log(f"  ключ тип: {type(k).__name__}")
+                except Exception as ex:
+                    self._add_log(f"  ключ parse error: {ex}")
+
+            # Хеш файла прямо сейчас
+            try:
+                from src.hashing import SHA256Hash
+                cur_hash = SHA256Hash().hash_file(filepath)
+                self._add_log(f"  SHA256 файла сейчас: {cur_hash.hex()[:32]}...")
+            except Exception as ex:
+                self._add_log(f"  hash error: {ex}")
+
             result = CryptoEngine.verify_signature(filepath, actual_sig, profile)
             if result.success:
                 self._add_log(result.message, is_success=True)
@@ -1416,10 +1490,31 @@ class CryptoApp:
                 self._add_log(f"  Сохранено в: {result.output_path}")
 
             if result.details:
-                profile.private_key_path = result.details.get("private_key_path", "")
-                profile.public_key_path = result.details.get("public_key_path", "")
+                priv = result.details.get("private_key_path", "")
+                pub  = result.details.get("public_key_path", "")
+
+                # Ключи шифрования
+                if priv:
+                    profile.private_key_path = priv
+                    self._add_log(f"  Шифрование приватный: {priv}")
+                if pub:
+                    profile.public_key_path = pub
+                    self._add_log(f"  Шифрование публичный: {pub}")
+
+                # Ключи подписи — могут быть ОТДЕЛЬНЫМИ от ключей шифрования
+                # (например Ed25519 подпись + RSA шифрование)
+                sign_priv = result.details.get("signing_private_key_path", "")
+                sign_pub  = result.details.get("signing_public_key_path", "")
+                if hasattr(profile, 'signing_private_key_path'):
+                    if sign_priv:
+                        profile.signing_private_key_path = sign_priv
+                        self._add_log(f"  Подпись приватный: {sign_priv}")
+                    if sign_pub:
+                        profile.signing_public_key_path = sign_pub
+                        self._add_log(f"  Подпись публичный: {sign_pub}")
+
                 self.profile_manager.update_profile(self.selected_profile_index, profile)
-                self._add_log("  Пути ключей сохранены в профиль", is_success=True)
+                self._add_log("  Профиль сохранён", is_success=True)
         else:
             self._add_log(f"Ошибка: {result.message}", is_error=True)
 
@@ -1660,10 +1755,15 @@ class CryptoApp:
 
         self.page.overlay.append(dialog)
         dialog.open = True
+        # Прячем overlay — иначе он блокирует клики на dropdown в диалоге
+        self._drop_overlay.hide()
         self.page.update()
 
     def _close_dialog(self, dialog):
         dialog.open = False
+        # Возвращаем overlay
+        self._drop_overlay.show()
+        self._update_overlay_position()
         self.page.update()
 
     # ─── KEYBOARD ───────────────────────────────────────────────────────
