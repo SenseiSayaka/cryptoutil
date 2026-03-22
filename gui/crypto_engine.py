@@ -322,6 +322,54 @@ class CryptoEngine:
     # ── Хеш файла ────────────────────────────────────────────────────────────
 
     @staticmethod
+    def verify_gost_signature(data_path: str, sig_path: str) -> OperationResult:
+        """
+        Проверить российскую ЭЦП (ГОСТ Р 34.10-2012) из .sig/.p7s файла.
+        Не требует КриптоПро — использует pygost + pyasn1.
+        """
+        try:
+            from .gost_verifier import GostVerifier, format_result
+        except ImportError:
+            try:
+                import sys, os
+                sys.path.insert(0, os.path.dirname(__file__))
+                from gost_verifier import GostVerifier, format_result
+            except ImportError:
+                return OperationResult(
+                    False,
+                    "Модуль gost_verifier.py не найден в папке gui/."
+                )
+
+        try:
+            verifier = GostVerifier()
+            if data_path and os.path.exists(data_path):
+                result = verifier.verify(data_path, sig_path)
+            else:
+                result = verifier.parse_sig_only(sig_path)
+
+            text = format_result(result)
+
+            if not result.success:
+                return OperationResult(False, text,
+                                       details={"raw": result})
+
+            return OperationResult(
+                success=True,
+                message=text,
+                details={
+                    "raw":           result,
+                    "certificates":  result.certificates,
+                    "sign_time":     result.sign_time,
+                    "algo":          result.signature_algo,
+                    "math_valid":    result.signature_valid,
+                    "warnings":      result.warnings,
+                }
+            )
+        except Exception as e:
+            return OperationResult(False, f"Ошибка ЭЦП верификации: {e}",
+                                   error=traceback.format_exc())
+
+    @staticmethod
     def hash_file(filepath: str, algorithm: str = "sha256") -> OperationResult:
         try:
             file_hash = calculate_file_hash(filepath, algorithm)

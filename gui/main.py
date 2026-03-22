@@ -244,6 +244,7 @@ class CryptoApp:
                 self._nav_button("Подпись", "sign", ft.Icons.EDIT_NOTE),
                 self._nav_button("Проверка", "verify", ft.Icons.VERIFIED),
                 self._nav_button("Хеширование", "hash", ft.Icons.TAG),
+                self._nav_button("ЭЦП (ГОСТ)", "gost", ft.Icons.VERIFIED_USER),
                 self._nav_button("Ключи", "keys", ft.Icons.KEY),
             ],
             spacing=2,
@@ -372,6 +373,7 @@ class CryptoApp:
             "sign": self._build_sign_view,
             "verify": self._build_verify_view,
             "hash": self._build_hash_view,
+            "gost": self._build_gost_view,
             "keys": self._build_keys_view,
         }
 
@@ -386,8 +388,8 @@ class CryptoApp:
         self._update_overlay_position()
 
         # Показываем/скрываем overlay (не нужен на вкладке "keys")
-        if view == "keys":
-            self._drop_overlay.hide()  # прячем на вкладке keys
+        if view in ("keys", "gost"):
+            self._drop_overlay.hide()  # прячем на вкладках без DnD
         else:
             self._update_overlay_position()
 
@@ -400,6 +402,7 @@ class CryptoApp:
             ("Подпись", "sign", ft.Icons.EDIT_NOTE),
             ("Проверка", "verify", ft.Icons.VERIFIED),
             ("Хеширование", "hash", ft.Icons.TAG),
+            ("ЭЦП (ГОСТ)", "gost", ft.Icons.VERIFIED_USER),
             ("Ключи", "keys", ft.Icons.KEY),
         ]
         nav_col.controls = [self._nav_button(l, v, i) for l, v, i in views_data]
@@ -777,6 +780,193 @@ class CryptoApp:
         )
 
     # ─── KEYS VIEW ──────────────────────────────────────────────────────
+
+    def _build_gost_view(self) -> ft.Column:
+        """Вкладка верификации российской ЭЦП (ГОСТ Р 34.10-2012)"""
+
+        # Поле — путь к подписываемому файлу (опционально)
+        self._gost_data_field = ft.TextField(
+            label="Файл данных (опционально для просмотра сертификата)",
+            hint_text="Путь к исходному файлу...",
+            border_color=AppTheme.BORDER_COLOR,
+            focused_border_color=AppTheme.ACCENT_PRIMARY,
+            bgcolor=AppTheme.BG_INPUT,
+            color=AppTheme.TEXT_PRIMARY,
+            border_radius=8,
+            read_only=True,
+            suffix=ft.IconButton(
+                icon=ft.Icons.FOLDER_OPEN,
+                icon_color=AppTheme.TEXT_SECONDARY,
+                on_click=self._gost_pick_data_file,
+                tooltip="Выбрать файл данных",
+            ),
+        )
+
+        # Поле — путь к .sig/.p7s
+        self._gost_sig_field = ft.TextField(
+            label="Файл подписи (.sig, .p7s, .p7) *обязательно",
+            hint_text="Путь к файлу подписи...",
+            border_color=AppTheme.BORDER_COLOR,
+            focused_border_color=AppTheme.ACCENT_PRIMARY,
+            bgcolor=AppTheme.BG_INPUT,
+            color=AppTheme.TEXT_PRIMARY,
+            border_radius=8,
+            read_only=True,
+            suffix=ft.IconButton(
+                icon=ft.Icons.FOLDER_OPEN,
+                icon_color=AppTheme.TEXT_SECONDARY,
+                on_click=self._gost_pick_sig_file,
+                tooltip="Выбрать файл подписи",
+            ),
+        )
+
+        # Результат
+        self._gost_result_text = ft.Text(
+            value="",
+            size=13,
+            color=AppTheme.TEXT_PRIMARY,
+            selectable=True,
+        )
+        self._gost_result_card = ft.Container(
+            content=ft.Column([
+                ft.Text("Результат проверки",
+                        size=13, weight=ft.FontWeight.W_600,
+                        color=AppTheme.TEXT_SECONDARY),
+                self._gost_result_text,
+            ], spacing=8),
+            bgcolor=AppTheme.BG_INPUT,
+            border_radius=10,
+            padding=16,
+            border=ft.border.all(1, AppTheme.BORDER_COLOR),
+            visible=False,
+        )
+
+        # Кнопки
+        verify_btn = ft.ElevatedButton(
+            "🔍  Проверить подпись",
+            bgcolor=AppTheme.ACCENT_PRIMARY,
+            color="white",
+            height=44,
+            on_click=self._gost_verify,
+        )
+        inspect_btn = ft.ElevatedButton(
+            "📄  Только сертификат",
+            bgcolor=AppTheme.BG_INPUT,
+            color=AppTheme.TEXT_PRIMARY,
+            height=44,
+            on_click=self._gost_inspect,
+            tooltip="Показать информацию о сертификате без верификации",
+        )
+
+        # Подсказка об установке зависимостей
+        deps_hint = ft.Container(
+            content=ft.Text(
+                "ℹ️  Для математической верификации ГОСТ подписи установите:\n"
+                "pip install gostcrypto pyasn1 pyasn1-modules",
+                size=11,
+                color=AppTheme.TEXT_SECONDARY,
+                selectable=True,
+            ),
+            bgcolor=f"{AppTheme.ACCENT_PRIMARY}15",
+            border_radius=8,
+            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            border=ft.border.all(1, f"{AppTheme.ACCENT_PRIMARY}40"),
+        )
+
+        return ft.Column(
+            controls=[
+                ft.Text("ЭЦП (ГОСТ)", size=24,
+                        weight=ft.FontWeight.W_700,
+                        color=AppTheme.TEXT_PRIMARY),
+                ft.Text("Проверка российской электронной подписи ГОСТ Р 34.10-2012",
+                        size=13, color=AppTheme.TEXT_SECONDARY),
+                deps_hint,
+                self._gost_data_field,
+                self._gost_sig_field,
+                ft.Row([verify_btn, inspect_btn], spacing=12),
+                self._gost_result_card,
+            ],
+            spacing=16,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+    def _gost_pick_data_file(self, e):
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk(); root.withdraw()
+        path = filedialog.askopenfilename(title="Выберите файл данных")
+        root.destroy()
+        if path:
+            self._gost_data_field.value = path
+            self.page.update()
+
+    def _gost_pick_sig_file(self, e):
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk(); root.withdraw()
+        path = filedialog.askopenfilename(
+            title="Выберите файл подписи",
+            filetypes=[("Файлы подписи", "*.sig *.p7s *.p7"),
+                       ("Все файлы", "*.*")]
+        )
+        root.destroy()
+        if path:
+            self._gost_sig_field.value = path
+            # Если data файл не выбран — пробуем автоматически найти
+            # (убираем расширение подписи)
+            if not self._gost_data_field.value:
+                for ext in (".sig", ".p7s", ".p7"):
+                    if path.endswith(ext):
+                        candidate = path[:-len(ext)]
+                        if os.path.exists(candidate):
+                            self._gost_data_field.value = candidate
+                        break
+            self.page.update()
+
+    def _gost_show_result(self, op_result):
+        """Отобразить результат верификации ЭЦП."""
+        self._gost_result_text.value = op_result.message
+        if op_result.success:
+            self._gost_result_text.color = (
+                AppTheme.SUCCESS if "ВАЛИДНА" in op_result.message
+                else AppTheme.TEXT_PRIMARY
+            )
+        else:
+            self._gost_result_text.color = AppTheme.ERROR if hasattr(AppTheme, "ERROR") else "#ef4444"
+        self._gost_result_card.visible = True
+        self.page.update()
+
+    def _gost_verify(self, e):
+        sig_path  = getattr(self, "_gost_sig_field",  None)
+        data_path = getattr(self, "_gost_data_field", None)
+        if not sig_path or not sig_path.value:
+            self._add_log("ЭЦП: укажите файл подписи (.sig/.p7s)", is_error=True)
+            return
+        self._add_log(f"ЭЦП: проверка {os.path.basename(sig_path.value)}...")
+        result = CryptoEngine.verify_gost_signature(
+            data_path.value if data_path else "",
+            sig_path.value
+        )
+        self._gost_show_result(result)
+        if result.success:
+            self._add_log(
+                "✅ ЭЦП разобрана" if result.details and
+                result.details.get("math_valid") is None
+                else ("✅ ЭЦП ВАЛИДНА" if result.details and
+                      result.details.get("math_valid") else "❌ ЭЦП НЕДЕЙСТВИТЕЛЬНА"),
+                is_success=result.success
+            )
+        else:
+            self._add_log(f"Ошибка ЭЦП: {result.message}", is_error=True)
+
+    def _gost_inspect(self, e):
+        sig_path = getattr(self, "_gost_sig_field", None)
+        if not sig_path or not sig_path.value:
+            self._add_log("ЭЦП: укажите файл подписи (.sig/.p7s)", is_error=True)
+            return
+        self._add_log(f"ЭЦП: разбор сертификата из {os.path.basename(sig_path.value)}...")
+        result = CryptoEngine.verify_gost_signature("", sig_path.value)
+        self._gost_show_result(result)
 
     def _build_keys_view(self) -> ft.Column:
         self.log_area.controls.clear()
@@ -1769,7 +1959,7 @@ class CryptoApp:
     # ─── KEYBOARD ───────────────────────────────────────────────────────
 
     def _on_keyboard(self, e: ft.KeyboardEvent):
-        views = ["encrypt", "decrypt", "sign", "verify", "hash", "keys"]
+        views = ["encrypt", "decrypt", "sign", "verify", "hash", "gost", "keys"]
         if e.ctrl:
             key_map = {"1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5}
             idx = key_map.get(e.key)
